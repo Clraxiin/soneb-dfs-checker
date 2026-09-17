@@ -1,10 +1,10 @@
+
 import asyncio
 import os
-import re
+import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import requests
 from playwright.async_api import async_playwright
 
 
@@ -14,37 +14,27 @@ from playwright.async_api import async_playwright
 
 SONEB_URL = "https://appointment.soneb.gov.so/#2"
 
-# Telegram
-# Values are loaded from GitHub Actions Secrets / environment
+TARGET_CENTER = "Xarunta Dhexe Xafiiska Imtixaanaadka"
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Checker settings
-TIMEZONE = "Africa/Mogadishu"
+TIMEZONE = ZoneInfo("Africa/Mogadishu")
 
-# We check between 06:00 and 22:00
 START_HOUR = 6
 END_HOUR = 22
 
-# Exact center
-TARGET_CENTER = "Xarunta Dhexe Xafiiska Imtixaanaadka"
-
+# Heartbeat: 60 minutes
+HEARTBEAT_FILE = "heartbeat.txt"
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
+
 def send_telegram(message):
-    """
-    Send a Telegram message.
-    """
-
-    if not TELEGRAM_BOT_TOKEN:
-        print("ERROR: TELEGRAM_BOT_TOKEN is missing.")
-        return False
-
-    if not TELEGRAM_CHAT_ID:
-        print("ERROR: TELEGRAM_CHAT_ID is missing.")
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram secrets are missing.")
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -55,446 +45,68 @@ def send_telegram(message):
     }
 
     try:
-        response = requests.post(
-            url,
-            data=data,
-            timeout=20,
-        )
+        response = requests.post(url, data=data, timeout=20)
 
-        print("Telegram status:", response.status_code)
-
-        if response.status_code == 200:
-            print("Telegram message sent successfully.")
+        if response.ok:
+            print("Telegram notification sent.")
             return True
 
-        print("Telegram response:", response.text)
+        print("Telegram error:", response.text)
         return False
 
     except Exception as e:
-        print("Telegram error:", repr(e))
+        print("Telegram request failed:", e)
         return False
 
 
 # ============================================================
-# TIME
+# HEARTBEAT
 # ============================================================
 
-def get_local_time():
-    return datetime.now(ZoneInfo(TIMEZONE))
 
-
-def is_daytime():
+def should_send_heartbeat():
     """
-    Checker runs from 06:00 until before 22:00.
-    """
-
-    now = get_local_time()
-
-    return START_HOUR <= now.hour < END_HOUR
-
-
-# ============================================================
-# DEBUG SELECTS
-# ============================================================
-
-async def print_selects(page, title=""):
-    print()
-    print("=" * 70)
-    print(title)
-    print("=" * 70)
-
-    selects = page.locator("select")
-
-    count = await selects.count()
-
-    print(f"Found {count} select elements.")
-
-    for i in range(count):
-        select = selects.nth(i)
-
-        try:
-            options = await select.locator("option").all_text_contents()
-
-            values = await select.locator("option").evaluate_all(
-                """
-                options => options.map(o => ({
-                    text: o.textContent.trim(),
-                    value: o.value
-                }))
-                """
-            )
-
-            print(f"\nSELECT #{i}")
-            print("Options:")
-            print(options)
-
-            print("Values:")
-            print(values)
-
-        except Exception as e:
-            print(
-                f"Could not inspect select #{i}: "
-                f"{repr(e)}"
-            )
-
-
-# ============================================================
-# NETWORK DEBUG
-# ============================================================
-
-def setup_network_logging(page):
-    """
-    Log XHR and fetch requests.
-    Useful for debugging the SONEB website/API.
+    Returns True if:
+    - heartbeat.txt does not exist
+    OR
+    - 60 minutes have passed since the last heartbeat.
     """
 
-    def on_request(request):
-        if request.resource_type in ["xhr", "fetch"]:
-            print(
-                f"\n>>> REQUEST: "
-                f"{request.method} {request.url}"
-            )
+    now = datetime.now(TIMEZONE)
 
-    def on_response(response):
-        request = response.request
+    if not os.path.exists(HEARTBEAT_FILE):
+        return True
 
-        if request.resource_type in ["xhr", "fetch"]:
-            print(
-                f"\n<<< RESPONSE: "
-                f"{response.status} {response.url}"
-            )
+    try:
+        with open(HEARTBEAT_FILE, "r", encoding="utf-8") as f:
+            last_string = f.read().strip()
 
-    page.on("request", on_request)
-    page.on("response", on_response)
+        last_time = datetime.fromisoformat(last_string)
+
+        elapsed_minutes = (now - last_time).total_seconds() / 60
+
+        print(f"Minutes since last heartbeat: {elapsed_minutes:.1f}")
+
+        return elapsed_minutes >= 60
+
+    except Exception as e:
+        print("Could not read heartbeat:", e)
+        return True
 
 
-# ============================================================
-# FIND DFS SELECT
-# ============================================================
+def update_heartbeat():
+    now = datetime.now(TIMEZONE)
 
-async def find_dfs_select(page):
-    selects = page.locator("select")
+    with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
+        f.write(now.isoformat())
 
-    count = await selects.count()
-
-    print(f"Searching {count} select elements for DFS...")
-
-    for i in range(count):
-
-        options = await selects.nth(i).locator(
-            "option"
-        ).all_text_contents()
-
-        for option in options:
-
-            if "DFS" in option.upper():
-
-                print(
-                    f"DFS found in SELECT #{i}: "
-                    f"{option.strip()}"
-                )
-
-                return selects.nth(i)
-
-    return None
+    print("Heartbeat timestamp updated.")
 
 
 # ============================================================
-# SELECT DFS
+# CHECK APPOINTMENT
 # ============================================================
 
-async def select_dfs(page):
-
-    print("\nSearching for DFS exam...")
-
-    select = await find_dfs_select(page)
-
-    if select is None:
-        raise RuntimeError(
-            "Could not find DFS option."
-        )
-
-    values = await select.locator(
-        "option"
-    ).evaluate_all(
-        """
-        options => options.map(o => ({
-            text: o.textContent.trim(),
-            value: o.value
-        }))
-        """
-    )
-
-    target_value = None
-    target_text = None
-
-    for option in values:
-
-        if "DFS" in option["text"].upper():
-
-            target_value = option["value"]
-            target_text = option["text"]
-
-            break
-
-    if target_value is None:
-        raise RuntimeError(
-            "DFS option was not found."
-        )
-
-    print(
-        f"Selecting DFS: "
-        f"{target_text} "
-        f"(value: {target_value})"
-    )
-
-    await select.select_option(target_value)
-
-    print("DFS selected.")
-
-    # Give the website time to load dependent fields
-    await page.wait_for_timeout(5000)
-
-
-# ============================================================
-# FIND CENTER
-# ============================================================
-
-async def find_center(page):
-
-    selects = page.locator("select")
-
-    count = await selects.count()
-
-    for i in range(count):
-
-        options = await selects.nth(i).locator(
-            "option"
-        ).all_text_contents()
-
-        clean_options = [
-            x.strip()
-            for x in options
-            if x.strip()
-        ]
-
-        for option in clean_options:
-
-            if TARGET_CENTER.lower() in option.lower():
-
-                print(
-                    f"Center found in SELECT #{i}: "
-                    f"{option}"
-                )
-
-                return selects.nth(i)
-
-    return None
-
-
-# ============================================================
-# SELECT CENTER
-# ============================================================
-
-async def select_center(page):
-
-    print("\nSearching for center...")
-
-    for attempt in range(10):
-
-        print(
-            f"Waiting for center options... "
-            f"attempt {attempt + 1}/10"
-        )
-
-        center_select = await find_center(page)
-
-        if center_select is not None:
-
-            values = await center_select.locator(
-                "option"
-            ).evaluate_all(
-                """
-                options => options.map(o => ({
-                    text: o.textContent.trim(),
-                    value: o.value
-                }))
-                """
-            )
-
-            for option in values:
-
-                if TARGET_CENTER.lower() in option["text"].lower():
-
-                    print(
-                        "Selecting center:",
-                        option["text"]
-                    )
-
-                    await center_select.select_option(
-                        option["value"]
-                    )
-
-                    await page.wait_for_timeout(3000)
-
-                    print("Center selected.")
-
-                    return center_select
-
-        await page.wait_for_timeout(2000)
-
-    raise RuntimeError(
-        "Could not find center: "
-        + TARGET_CENTER
-    )
-
-
-# ============================================================
-# GET APPOINTMENT DATES
-# ============================================================
-
-async def get_appointment_dates(page):
-
-    print("\nChecking appointment dates...")
-
-    selects = page.locator("select")
-
-    select_count = await selects.count()
-
-    print(
-        f"Total select elements: {select_count}"
-    )
-
-    # --------------------------------------------------------
-    # First try to identify the date select dynamically.
-    # --------------------------------------------------------
-
-    date_select = None
-
-    for i in range(select_count):
-
-        select = selects.nth(i)
-
-        try:
-
-            options = await select.locator(
-                "option"
-            ).all_text_contents()
-
-            for option in options:
-
-                text = option.strip()
-
-                if re.match(
-                    r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$",
-                    text
-                ):
-                    date_select = select
-                    print(
-                        f"Date select found dynamically: "
-                        f"SELECT #{i}"
-                    )
-                    break
-
-                if re.match(
-                    r"^\d{1,2}[-/]\d{1,2}[-/]\d{4}$",
-                    text
-                ):
-                    date_select = select
-                    print(
-                        f"Date select found dynamically: "
-                        f"SELECT #{i}"
-                    )
-                    break
-
-            if date_select is not None:
-                break
-
-        except Exception:
-            continue
-
-    # --------------------------------------------------------
-    # Fallback to original SELECT #3
-    # --------------------------------------------------------
-
-    if date_select is None and select_count > 3:
-
-        print(
-            "Dynamic date select not found. "
-            "Using SELECT #3 fallback."
-        )
-
-        date_select = selects.nth(3)
-
-    if date_select is None:
-
-        print(
-            "Appointment date dropdown not found."
-        )
-
-        return []
-
-    await page.wait_for_timeout(2000)
-
-    values = await date_select.locator(
-        "option"
-    ).evaluate_all(
-        """
-        options => options.map(o => ({
-            text: o.textContent.trim(),
-            value: o.value
-        }))
-        """
-    )
-
-    dates = []
-
-    for option in values:
-
-        text = option["text"].strip()
-
-        if not text:
-            continue
-
-        if text.lower() in [
-            "please select",
-            "select",
-            "choose",
-            "choose date",
-        ]:
-            continue
-
-        is_date = (
-            bool(
-                re.match(
-                    r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$",
-                    text
-                )
-            )
-            or
-            bool(
-                re.match(
-                    r"^\d{1,2}[-/]\d{1,2}[-/]\d{4}$",
-                    text
-                )
-            )
-        )
-
-        if is_date:
-
-            dates.append(text)
-
-    print(
-        "Valid appointment dates:",
-        dates
-    )
-
-    return dates
-
-
-# ============================================================
-# MAIN SONEB CHECK
-# ============================================================
 
 async def check_appointment():
 
@@ -504,109 +116,201 @@ async def check_appointment():
             headless=True
         )
 
-        page = await browser.new_page(
-            viewport={
-                "width": 1366,
-                "height": 900,
-            }
-        )
+        page = await browser.new_page()
 
         try:
 
-            print(
-                "\n"
-                + "=" * 70
-                + "\nOpening SONEB...\n"
-                + "=" * 70
-            )
-
-            # Uncomment this when debugging network/API
-            # setup_network_logging(page)
+            print("Opening SONEB...")
 
             await page.goto(
                 SONEB_URL,
-                wait_until="domcontentloaded",
-                timeout=60000,
+                wait_until="networkidle",
+                timeout=60000
             )
 
-            print(
-                "SONEB page loaded."
-            )
+            await page.wait_for_timeout(3000)
 
-            await page.wait_for_timeout(5000)
+            body_text = (await page.locator("body").inner_text()).lower()
 
-            # ------------------------------------------------
-            # CAPTCHA / CLOUDFLARE CHECK
-            # ------------------------------------------------
-
-            content = await page.locator(
-                "body"
-            ).inner_text()
-
-            content_lower = content.lower()
-
-            if (
-                "captcha" in content_lower
-                or "cloudflare" in content_lower
-            ):
-
-                print(
-                    "\nWARNING: "
-                    "CAPTCHA/Cloudflare detected."
-                )
-
+            if "captcha" in body_text or "cloudflare" in body_text:
+                print("CAPTCHA / Cloudflare detected.")
                 return []
 
-            # ------------------------------------------------
+            # ====================================================
             # SELECT DFS
-            # ------------------------------------------------
+            # ====================================================
 
-            await select_dfs(page)
+            print("Selecting DFS...")
 
-            # ------------------------------------------------
+            dfs_found = False
+
+            selects = page.locator("select")
+
+            count = await selects.count()
+
+            print(f"Select elements found: {count}")
+
+            for i in range(count):
+
+                select = selects.nth(i)
+
+                try:
+
+                    options = await select.locator("option").all_inner_texts()
+
+                    for option in options:
+
+                        if "DFS" in option.upper():
+
+                            await select.select_option(
+                                label=option
+                            )
+
+                            dfs_found = True
+
+                            print(f"DFS selected: {option}")
+
+                            break
+
+                    if dfs_found:
+                        break
+
+                except Exception:
+                    continue
+
+            if not dfs_found:
+                print("DFS option was not found.")
+                return []
+
+            await page.wait_for_timeout(2000)
+
+            # ====================================================
             # SELECT CENTER
-            # ------------------------------------------------
+            # ====================================================
 
-            await select_center(page)
+            print("Selecting target center...")
 
-            # ------------------------------------------------
-            # GET DATES
-            # ------------------------------------------------
+            center_found = False
 
-            dates = await get_appointment_dates(
-                page
-            )
+            selects = page.locator("select")
+            count = await selects.count()
 
-            return dates
+            for i in range(count):
+
+                select = selects.nth(i)
+
+                try:
+
+                    options = await select.locator("option").all_inner_texts()
+
+                    for option in options:
+
+                        if TARGET_CENTER.lower() in option.lower():
+
+                            await select.select_option(
+                                label=option
+                            )
+
+                            center_found = True
+
+                            print(f"Center selected: {option}")
+
+                            break
+
+                    if center_found:
+                        break
+
+                except Exception:
+                    continue
+
+            if not center_found:
+                print("Target center was not found.")
+                return []
+
+            await page.wait_for_timeout(2000)
+
+            # ====================================================
+            # FIND DATE SELECT
+            # ====================================================
+
+            print("Checking appointment dates...")
+
+            selects = page.locator("select")
+            count = await selects.count()
+
+            appointment_dates = []
+
+            for i in range(count):
+
+                select = selects.nth(i)
+
+                try:
+
+                    options = await select.locator("option").all_inner_texts()
+
+                    for option in options:
+
+                        text = option.strip()
+
+                        if not text:
+                            continue
+
+                        lower = text.lower()
+
+                        # Ignore generic/select placeholder options
+                        if any(
+                            word in lower
+                            for word in [
+                                "select",
+                                "door",
+                                "choose",
+                                "xulo",
+                                "dooro"
+                            ]
+                        ):
+                            continue
+
+                        # Detect date-like options
+                        if any(
+                            month in lower
+                            for month in [
+                                "jan",
+                                "feb",
+                                "mar",
+                                "apr",
+                                "may",
+                                "jun",
+                                "jul",
+                                "aug",
+                                "sep",
+                                "oct",
+                                "nov",
+                                "dec"
+                            ]
+                        ):
+                            appointment_dates.append(text)
+
+                except Exception:
+                    continue
+
+            # Remove duplicates
+            appointment_dates = list(dict.fromkeys(appointment_dates))
+
+            print("Appointment dates:", appointment_dates)
+
+            return appointment_dates
 
         except Exception as e:
 
-            print(
-                "\nCHECK ERROR:",
-                type(e).__name__,
-                ":",
-                str(e),
-            )
+            print("Checker error:", repr(e))
 
-            # Save screenshot for debugging
             try:
-
                 await page.screenshot(
                     path="soneb_error.png",
-                    full_page=True,
+                    full_page=True
                 )
-
-                print(
-                    "Error screenshot saved:"
-                    " soneb_error.png"
-                )
-
-            except Exception as screenshot_error:
-
-                print(
-                    "Could not save screenshot:",
-                    repr(screenshot_error)
-                )
+            except Exception:
+                pass
 
             return []
 
@@ -616,128 +320,84 @@ async def check_appointment():
 
 
 # ============================================================
-# TELEGRAM NOTIFICATION
-# ============================================================
-
-def notify_open(dates):
-
-    now_str = get_local_time().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-    message = (
-        "🟢 SONEB DFS APPOINTMENT WAA FURAN YAHAY!\n\n"
-        f"⏰ Waqtiga: {now_str}\n"
-        f"📍 Center: {TARGET_CENTER}\n\n"
-        "📅 Taariikhaha Furan:\n"
-        + "\n".join(
-            f"• {date}"
-            for date in dates
-        )
-        + "\n\n"
-        f"🔗 Ballanso Hadda:\n{SONEB_URL}"
-    )
-
-    print(
-        "\nAppointment FOUND!"
-    )
-
-    send_telegram(message)
-
-
-def notify_error():
-
-    now_str = get_local_time().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-    message = (
-        "⚠️ SONEB CHECKER ERROR\n\n"
-        f"⏰ Waqtiga: {now_str}\n"
-        f"📍 Center: {TARGET_CENTER}\n\n"
-        "Checker-ku wuxuu la kulmay error "
-        "markii uu website-ka hubinayay."
-    )
-
-    send_telegram(message)
-
-
-# ============================================================
 # MAIN
 # ============================================================
 
+
 async def main():
+
+    now = datetime.now(TIMEZONE)
 
     print("=" * 70)
     print("SONEB DFS APPOINTMENT CHECKER")
     print("=" * 70)
+    print("Time:", now.strftime("%Y-%m-%d %H:%M:%S"))
+    print("Timezone: Africa/Mogadishu")
+    print("Target:", TARGET_CENTER)
+    print("=" * 70)
 
-    now = get_local_time()
+    # ========================================================
+    # CHECK HOURS
+    # ========================================================
 
-    print(
-        f"\nCurrent Somalia time: "
-        f"{now.strftime('%Y-%m-%d %H:%M:%S')}"
-    )
+    if not (START_HOUR <= now.hour < END_HOUR):
 
-    # --------------------------------------------------------
-    # CHECK TIME
-    # --------------------------------------------------------
-
-    if not is_daytime():
-
-        print(
-            f"Outside checking hours "
-            f"({START_HOUR:02d}:00-"
-            f"{END_HOUR:02d}:00)."
-        )
+        print("Outside checking hours.")
 
         return
 
-    # --------------------------------------------------------
-    # RUN SONEB CHECK
-    # --------------------------------------------------------
+    # ========================================================
+    # CHECK SONEB
+    # ========================================================
 
     dates = await check_appointment()
 
-    # --------------------------------------------------------
-    # IMPORTANT
-    #
-    # We only notify Telegram when appointments are found.
-    # This prevents Telegram spam every 10 minutes.
-    # --------------------------------------------------------
+    # ========================================================
+    # APPOINTMENT FOUND
+    # ========================================================
 
     if dates:
 
-        notify_open(dates)
+        message = (
+            "🚨 SONEB DFS APPOINTMENT OPEN!\n\n"
+            f"Xarunta:\n{TARGET_CENTER}\n\n"
+            "📅 Taariikhaha la helay:\n"
+            + "\n".join(f"• {date}" for date in dates)
+            + "\n\n"
+            "⚡ Fadlan hadda hubi website-ka."
+        )
+
+        send_telegram(message)
+
+        print("Appointment FOUND!")
+
+        return
+
+    # ========================================================
+    # NO APPOINTMENT
+    # ========================================================
+
+    print("No appointment found.")
+
+    # Send heartbeat every 60 minutes
+    if should_send_heartbeat():
+
+        message = (
+            "🔄 SONEB DFS STATUS\n\n"
+            "❌ Wali ballan lama furin.\n\n"
+            "✅ Checker-ku wuu shaqeynayaa.\n"
+            "⏱️ Wuxuu hubinayaa SONEB 10 daqiiqo kasta.\n\n"
+            f"🕐 {now.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+        if send_telegram(message):
+            update_heartbeat()
 
     else:
 
-        print(
-            "\n🔴 No appointment dates found."
-        )
+        print("Heartbeat not due yet.")
 
-        print(
-            "No Telegram notification sent."
-        )
-
-    print(
-        "\nCheck completed successfully."
-    )
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
-
-    try:
-
-        asyncio.run(main())
-
-    except KeyboardInterrupt:
-
-        print(
-            "\nChecker stopped by user."
-        )
+    asyncio.run(main())
 
