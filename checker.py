@@ -124,7 +124,7 @@ async def check_appointment():
 
             await page.goto(
                 SONEB_URL,
-                wait_until="networkidle",
+                wait_until="domcontentloaded",
                 timeout=60000
             )
 
