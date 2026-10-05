@@ -1,5 +1,6 @@
 import asyncio
 import os
+import random
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -12,7 +13,6 @@ from playwright.async_api import async_playwright
 # ============================================================
 
 SONEB_URL = "https://appointment.soneb.gov.so/#2"
-
 TARGET_CENTER = "Xarunta Dhexe Xafiiska Imtixaanaadka"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -27,7 +27,7 @@ HEARTBEAT_FILE = "heartbeat.txt"
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM NOTIFICATION
 # ============================================================
 
 def send_telegram(message):
@@ -35,1218 +35,354 @@ def send_telegram(message):
         print("Telegram secrets are missing.")
         return False
 
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    )
-
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
     }
 
     try:
-        response = requests.post(
-            url,
-            data=data,
-            timeout=20
-        )
-
+        response = requests.post(url, data=data, timeout=20)
         if response.ok:
             print("Telegram notification sent.")
             return True
-
         print("Telegram error:", response.text)
         return False
-
     except Exception as e:
-        print(
-            "Telegram request failed:",
-            repr(e)
-        )
+        print("Telegram request failed:", repr(e))
         return False
 
 
 # ============================================================
-# HEARTBEAT
+# HEARTBEAT SYSTEM
 # ============================================================
 
 def should_send_heartbeat():
-
     now = datetime.now(TIMEZONE)
-
     if not os.path.exists(HEARTBEAT_FILE):
         return True
 
     try:
-
-        with open(
-            HEARTBEAT_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
+        with open(HEARTBEAT_FILE, "r", encoding="utf-8") as f:
             last_string = f.read().strip()
 
-        last_time = datetime.fromisoformat(
-            last_string
-        )
-
-        elapsed_minutes = (
-            now - last_time
-        ).total_seconds() / 60
-
-        print(
-            f"Minutes since last heartbeat: "
-            f"{elapsed_minutes:.1f}"
-        )
+        last_time = datetime.fromisoformat(last_string)
+        elapsed_minutes = (now - last_time).total_seconds() / 60
+        print(f"Minutes since last heartbeat: {elapsed_minutes:.1f}")
 
         return elapsed_minutes >= 60
-
     except Exception as e:
-
-        print(
-            "Could not read heartbeat:",
-            repr(e)
-        )
-
+        print("Could not read heartbeat:", repr(e))
         return True
 
 
 def update_heartbeat():
-
     now = datetime.now(TIMEZONE)
-
-    with open(
-        HEARTBEAT_FILE,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        f.write(
-            now.isoformat()
-        )
-
-    print(
-        "Heartbeat timestamp updated."
-    )
+    with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
+        f.write(now.isoformat())
+    print("Heartbeat timestamp updated.")
 
 
 # ============================================================
-# CAPTCHA / CLOUDFLARE DETECTION
+# CLOUDFLARE / CAPTCHA DETECTION
 # ============================================================
 
 async def detect_real_block(page):
-
     """
-    Tries to detect an actual CAPTCHA / Cloudflare
-    challenge instead of simply searching the entire
-    body for the words "captcha" or "cloudflare".
+    Detects active Cloudflare block/challenge screens by checking page title
+    and visible challenge elements, avoiding internal script matches.
     """
-
     try:
+        title = (await page.title()).strip()
+        print("PAGE TITLE:", title)
+        print("PAGE URL:", page.url)
 
-        title = (
-            await page.title()
-        ).strip()
-
-        url = page.url
-
-        body_text = (
-            await page.locator(
-                "body"
-            ).inner_text()
-        )
-
-        body_lower = body_text.lower()
-
-        print(
-            "PAGE TITLE:",
-            title
-        )
-
-        print(
-            "PAGE URL:",
-            url
-        )
-
-        # ----------------------------------------------------
-        # Print a limited amount for debugging
-        # ----------------------------------------------------
-
-        print(
-            "PAGE BODY PREVIEW:"
-        )
-
-        print(
-            body_text[:5000]
-        )
-
-        # ----------------------------------------------------
-        # Strong Cloudflare indicators
-        # ----------------------------------------------------
-
-        cloudflare_indicators = [
+        # 1. Cloudflare Title Check
+        blocking_titles = [
             "just a moment...",
-            "checking your browser",
-            "verify you are human",
-            "performing security verification",
-            "enable javascript and cookies",
-            "attention required",
-            "cf-chl",
-            "challenge-platform",
+            "attention required!",
+            "access denied",
+            "security check"
         ]
 
-        # ----------------------------------------------------
-        # CAPTCHA indicators
-        # ----------------------------------------------------
+        if any(b_title in title.lower() for b_title in blocking_titles):
+            print("REAL CLOUDFLARE BLOCK: Match found in page title.")
+            return True
 
-        captcha_indicators = [
-            "verify you are human",
-            "i'm not a robot",
-            "im not a robot",
-            "captcha challenge",
-            "complete the captcha",
-            "security check",
-        ]
-
-        cloudflare_found = any(
-            indicator in body_lower
-            for indicator in cloudflare_indicators
-        )
-
-        captcha_found = any(
-            indicator in body_lower
-            for indicator in captcha_indicators
-        )
-
-        # ----------------------------------------------------
-        # Check visible iframe
-        # ----------------------------------------------------
-
-        iframe_count = await page.locator(
-            "iframe"
-        ).count()
-
-        captcha_iframe_found = False
-
-        for i in range(iframe_count):
-
-            iframe = page.locator(
-                "iframe"
-            ).nth(i)
-
-            try:
-
-                src = (
-                    await iframe.get_attribute(
-                        "src"
-                    )
-                )
-
-                title_attr = (
-                    await iframe.get_attribute(
-                        "title"
-                    )
-                )
-
-                frame_info = (
-                    f"{src or ''} "
-                    f"{title_attr or ''}"
-                ).lower()
-
-                if (
-                    "captcha" in frame_info
-                    or "recaptcha" in frame_info
-                    or "hcaptcha" in frame_info
-                    or "challenge" in frame_info
-                ):
-
-                    captcha_iframe_found = True
-
-                    print(
-                        "Possible CAPTCHA iframe found:",
-                        frame_info
-                    )
-
-            except Exception:
-                continue
-
-        # ----------------------------------------------------
-        # Check visible challenge elements
-        # ----------------------------------------------------
-
+        # 2. Check visible Cloudflare Challenge UI elements
         challenge_selectors = [
             "#challenge-running",
             "#challenge-stage",
             ".cf-challenge",
             "[name='cf-turnstile-response']",
-            ".g-recaptcha",
-            ".h-captcha",
+            ".cf-turnstile"
         ]
 
-        challenge_element_found = False
-
         for selector in challenge_selectors:
-
             try:
-
-                locator = page.locator(
-                    selector
-                )
-
-                count = await locator.count()
-
-                if count > 0:
-
-                    for i in range(count):
-
-                        element = locator.nth(i)
-
-                        try:
-
-                            if await element.is_visible():
-
-                                challenge_element_found = True
-
-                                print(
-                                    "Visible challenge element:",
-                                    selector
-                                )
-
-                                break
-
-                        except Exception:
-                            continue
-
-                    if challenge_element_found:
-                        break
-
+                locator = page.locator(selector)
+                if await locator.count() > 0:
+                    for i in range(await locator.count()):
+                        if await locator.nth(i).is_visible():
+                            print(f"REAL BLOCK: Visible element detected ({selector}).")
+                            return True
             except Exception:
                 continue
 
-        # ----------------------------------------------------
-        # Final decision
-        # ----------------------------------------------------
+        # 3. Visible Challenge IFrames
+        iframes = page.locator("iframe")
+        for i in range(await iframes.count()):
+            iframe = iframes.nth(i)
+            try:
+                src = (await iframe.get_attribute("src") or "").lower()
+                if "challenges.cloudflare.com" in src or "recaptcha" in src:
+                    if await iframe.is_visible():
+                        print("REAL CAPTCHA IFRAME DETECTED:", src)
+                        return True
+            except Exception:
+                continue
 
-        if (
-            cloudflare_found
-            or captcha_found
-            or captcha_iframe_found
-            or challenge_element_found
-        ):
-
-            print(
-                "REAL CAPTCHA / CLOUDFLARE "
-                "INDICATOR DETECTED."
-            )
-
-            return True
-
-        print(
-            "No strong CAPTCHA / Cloudflare "
-            "indicator detected."
-        )
-
+        print("No Cloudflare block detected.")
         return False
 
     except Exception as e:
-
-        print(
-            "Block detection failed:",
-            repr(e)
-        )
-
-        # Don't automatically classify an error
-        # as CAPTCHA.
+        print("Block detection error:", repr(e))
         return False
 
 
 # ============================================================
-# SELECT DFS
+# FORM INTERACTION FUNCTIONS
 # ============================================================
 
 async def select_dfs(page):
-
-    print(
-        "Selecting DFS..."
-    )
-
-    selects = page.locator(
-        "select"
-    )
-
+    print("Selecting DFS...")
+    selects = page.locator("select")
     count = await selects.count()
 
-    print(
-        f"Select elements found: {count}"
-    )
-
     for i in range(count):
-
         select = selects.nth(i)
-
         try:
-
-            options = await select.locator(
-                "option"
-            ).all_inner_texts()
-
+            options = await select.locator("option").all_inner_texts()
             for option in options:
-
                 text = option.strip()
-
-                if not text:
-                    continue
-
-                if "DFS" in text.upper():
-
-                    await select.select_option(
-                        label=option
-                    )
-
-                    print(
-                        f"DFS selected: {text}"
-                    )
-
+                if text and "DFS" in text.upper():
+                    await select.select_option(label=option)
+                    print(f"DFS selected: {text}")
                     return True
-
-        except Exception as e:
-
-            print(
-                f"Could not inspect DFS select {i}:",
-                repr(e)
-            )
-
+        except Exception:
             continue
 
-    print(
-        "DFS option was not found."
-    )
-
+    print("DFS option was not found.")
     return False
 
-
-# ============================================================
-# SELECT CENTER
-# ============================================================
 
 async def select_center(page):
-
-    print(
-        "Selecting target center..."
-    )
-
-    selects = page.locator(
-        "select"
-    )
-
+    print("Selecting target center...")
+    selects = page.locator("select")
     count = await selects.count()
 
     for i in range(count):
-
         select = selects.nth(i)
-
         try:
-
-            options = await select.locator(
-                "option"
-            ).all_inner_texts()
-
+            options = await select.locator("option").all_inner_texts()
             for option in options:
-
                 text = option.strip()
-
-                if not text:
-                    continue
-
-                if (
-                    TARGET_CENTER.lower()
-                    in text.lower()
-                ):
-
-                    await select.select_option(
-                        label=option
-                    )
-
-                    print(
-                        f"Center selected: {text}"
-                    )
-
+                if text and TARGET_CENTER.lower() in text.lower():
+                    await select.select_option(label=option)
+                    print(f"Center selected: {text}")
                     return True
-
-        except Exception as e:
-
-            print(
-                f"Could not inspect center select {i}:",
-                repr(e)
-            )
-
+        except Exception:
             continue
 
-    print(
-        "Target center was NOT found."
-    )
-
-    print(
-        "Continuing to search for "
-        "Taariikhda Ballanta..."
-    )
-
+    print("Target center was NOT found. Continuing anyway...")
     return False
 
 
-# ============================================================
-# EXTRACT OPTIONS
-# ============================================================
-
 async def extract_select_options(select):
-
     try:
-
-        options = await select.locator(
-            "option"
-        ).all_inner_texts()
-
-        print(
-            "All options in appointment select:"
-        )
-
-        for option in options:
-            print(
-                repr(option)
-            )
-
+        options = await select.locator("option").all_inner_texts()
         useful_options = []
-
-        placeholders = [
-            "select",
-            "choose",
-            "door",
-            "dooro",
-            "xulo",
-            "xul",
-            "please select",
-            "select date",
-            "choose date",
-            "dooro taariikh",
-            "xulo taariikh",
-            "taariikh dooro",
-        ]
+        placeholders = ["select", "choose", "door", "dooro", "xulo", "dooro taariikh"]
 
         for option in options:
-
             text = option.strip()
-
             if not text:
                 continue
 
             lower = text.lower()
-
-            # ------------------------------------------------
-            # Ignore only obvious placeholders
-            # ------------------------------------------------
-
-            is_placeholder = False
-
-            for placeholder in placeholders:
-
-                if lower == placeholder:
-                    is_placeholder = True
-                    break
-
-                if lower.startswith(
-                    placeholder + " "
-                ):
-                    is_placeholder = True
-                    break
-
-            if is_placeholder:
-
-                print(
-                    f"Ignoring placeholder: {text}"
-                )
-
+            if any(lower == p or lower.startswith(p + " ") for p in placeholders):
                 continue
 
-            # ------------------------------------------------
-            # IMPORTANT:
-            # DO NOT parse date format.
-            # Accept whatever the website gives us.
-            # ------------------------------------------------
+            useful_options.append(text)
 
-            useful_options.append(
-                text
-            )
-
-        # Remove duplicates
-        useful_options = list(
-            dict.fromkeys(
-                useful_options
-            )
-        )
-
-        print(
-            "Useful appointment options:",
-            useful_options
-        )
-
+        useful_options = list(dict.fromkeys(useful_options))
+        print("Useful appointment dates found:", useful_options)
         return useful_options
 
     except Exception as e:
-
-        print(
-            "Could not extract options:",
-            repr(e)
-        )
-
+        print("Error extracting options:", repr(e))
         return []
 
 
-# ============================================================
-# FIND TAARIIKHDA BALLANTA
-# ============================================================
-
 async def find_appointment_date_options(page):
+    print("Searching for 'Taariikhda Ballanta'...")
 
-    print(
-        "Searching for "
-        "'Taariikhda Ballanta'..."
-    )
-
-    # --------------------------------------------------------
-    # METHOD 1: labels
-    # --------------------------------------------------------
-
-    labels = page.locator(
-        "label"
-    )
-
-    label_count = await labels.count()
-
-    print(
-        f"Labels found: {label_count}"
-    )
-
-    for i in range(label_count):
-
-        label = labels.nth(i)
-
-        try:
-
-            label_text = (
-                await label.inner_text()
-            ).strip()
-
-            if (
-                "taariikhda ballanta"
-                in label_text.lower()
-            ):
-
-                print(
-                    f"Appointment label found: "
-                    f"{label_text}"
-                )
-
-                label_for = (
-                    await label.get_attribute(
-                        "for"
-                    )
-                )
-
-                # --------------------------------------------
-                # Associated select using "for"
-                # --------------------------------------------
-
-                if label_for:
-
-                    select = page.locator(
-                        f"select#{label_for}"
-                    )
-
-                    if await select.count() > 0:
-
-                        print(
-                            "Select found using "
-                            "label 'for'."
-                        )
-
-                        return await extract_select_options(
-                            select
-                        )
-
-                # --------------------------------------------
-                # Select inside parent
-                # --------------------------------------------
-
-                parent = label.locator(
-                    ".."
-                )
-
-                select = parent.locator(
-                    "select"
-                )
-
-                if await select.count() > 0:
-
-                    print(
-                        "Select found inside "
-                        "label parent."
-                    )
-
-                    return await extract_select_options(
-                        select
-                    )
-
-        except Exception as e:
-
-            print(
-                "Label inspection error:",
-                repr(e)
-            )
-
-            continue
-
-    # --------------------------------------------------------
-    # METHOD 2: text locator
-    # --------------------------------------------------------
-
-    print(
-        "Searching visible text..."
-    )
-
-    text_locator = page.get_by_text(
-        "Taariikhda Ballanta",
-        exact=False
-    )
-
+    # Method 1: Search by text matching
+    text_locator = page.get_by_text("Taariikhda Ballanta", exact=False)
     try:
-
-        text_count = await text_locator.count()
-
-        print(
-            f"Matching text elements: "
-            f"{text_count}"
-        )
-
-        for i in range(text_count):
-
+        count = await text_locator.count()
+        for i in range(count):
             element = text_locator.nth(i)
+            parent = element.locator("..")
+            select = parent.locator("select")
+            if await select.count() > 0:
+                return await extract_select_options(select)
 
-            try:
+            grandparent = parent.locator("..")
+            select = grandparent.locator("select")
+            if await select.count() > 0:
+                return await extract_select_options(select)
+    except Exception:
+        pass
 
-                parent = element.locator(
-                    ".."
-                )
-
-                select = parent.locator(
-                    "select"
-                )
-
-                if await select.count() > 0:
-
-                    print(
-                        "Select found near "
-                        "'Taariikhda Ballanta'."
-                    )
-
-                    return await extract_select_options(
-                        select
-                    )
-
-                parent2 = parent.locator(
-                    ".."
-                )
-
-                select = parent2.locator(
-                    "select"
-                )
-
-                if await select.count() > 0:
-
-                    print(
-                        "Select found in "
-                        "parent's parent."
-                    )
-
-                    return await extract_select_options(
-                        select
-                    )
-
-            except Exception:
-                continue
-
-    except Exception as e:
-
-        print(
-            "Text search error:",
-            repr(e)
-        )
-
-    # --------------------------------------------------------
-    # METHOD 3: search all selects by parent text
-    # --------------------------------------------------------
-
-    print(
-        "Searching select parents..."
-    )
-
-    selects = page.locator(
-        "select"
-    )
-
-    count = await selects.count()
-
-    for i in range(count):
-
+    # Method 2: Search through all selects directly
+    selects = page.locator("select")
+    for i in range(await selects.count()):
         select = selects.nth(i)
-
         try:
-
-            parent = select.locator(
-                ".."
-            )
-
-            parent_text = (
-                await parent.inner_text()
-            ).strip()
-
-            if (
-                "taariikhda ballanta"
-                in parent_text.lower()
-            ):
-
-                print(
-                    "Appointment select found "
-                    "through parent text."
-                )
-
-                return await extract_select_options(
-                    select
-                )
-
-            grandparent = parent.locator(
-                ".."
-            )
-
-            grandparent_text = (
-                await grandparent.inner_text()
-            ).strip()
-
-            if (
-                "taariikhda ballanta"
-                in grandparent_text.lower()
-            ):
-
-                print(
-                    "Appointment select found "
-                    "through grandparent text."
-                )
-
-                return await extract_select_options(
-                    select
-                )
-
+            parent = select.locator("..")
+            parent_text = (await parent.inner_text()).strip().lower()
+            if "taariikhda ballanta" in parent_text:
+                return await extract_select_options(select)
         except Exception:
             continue
 
-    print(
-        "'Taariikhda Ballanta' select "
-        "was not found."
-    )
-
+    print("'Taariikhda Ballanta' option not available.")
     return []
 
 
 # ============================================================
-# MAIN CHECKER
+# MAIN CHECKER (STEALTH ENHANCED)
 # ============================================================
 
 async def check_appointment():
-
     async with async_playwright() as p:
-
+        # STEALTH CONFIGURATION
         browser = await p.chromium.launch(
-            headless=True
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-infobars",
+                "--window-position=0,0",
+                "--ignore-certificate-errors"
+            ]
         )
 
-        page = await browser.new_page()
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            viewport={"width": 1366, "height": 768},
+            locale="en-US",
+            timezone_id="Africa/Mogadishu"
+        )
+
+        page = await context.new_page()
+
+        # Hide Webdriver & Automation Signals
+        await page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+        """)
 
         try:
+            print("Opening SONEB Website...")
+            await page.goto(SONEB_URL, wait_until="networkidle", timeout=60000)
 
-            print(
-                "Opening SONEB..."
-            )
+            # Random Human-like Delay
+            await page.wait_for_timeout(random.randint(4000, 7000))
 
-            await page.goto(
-                SONEB_URL,
-                wait_until="domcontentloaded",
-                timeout=60000
-            )
+            # 1. Check Cloudflare
+            if await detect_real_block(page):
+                return {"status": "BLOCKED", "dates": [], "center_found": False}
 
-            print(
-                "SONEB page loaded."
-            )
+            # 2. Select DFS
+            if not await select_dfs(page):
+                return {"status": "DFS_NOT_FOUND", "dates": [], "center_found": False}
 
-            await page.wait_for_timeout(
-                5000
-            )
+            await page.wait_for_timeout(random.randint(2500, 4000))
 
-            # ------------------------------------------------
-            # CAPTCHA / CLOUDFLARE
-            # ------------------------------------------------
+            # 3. Select Center
+            center_found = await select_center(page)
+            await page.wait_for_timeout(random.randint(3000, 5000))
 
-            blocked = await detect_real_block(
-                page
-            )
-
-            if blocked:
-
-                return {
-                    "status": "BLOCKED",
-                    "dates": [],
-                    "center_found": False
-                }
-
-            # ------------------------------------------------
-            # DFS
-            # ------------------------------------------------
-
-            dfs_found = await select_dfs(
-                page
-            )
-
-            if not dfs_found:
-
-                return {
-                    "status": "DFS_NOT_FOUND",
-                    "dates": [],
-                    "center_found": False
-                }
-
-            # Give dependent fields time
-            await page.wait_for_timeout(
-                3000
-            )
-
-            # ------------------------------------------------
-            # CENTER
-            # ------------------------------------------------
-
-            center_found = await select_center(
-                page
-            )
-
-            if center_found:
-
-                await page.wait_for_timeout(
-                    4000
-                )
-
-            else:
-
-                # IMPORTANT:
-                # Do NOT stop.
-                print(
-                    "Center not found."
-                )
-
-                print(
-                    "Continuing anyway to "
-                    "appointment date field..."
-                )
-
-                await page.wait_for_timeout(
-                    2000
-                )
-
-            # ------------------------------------------------
-            # APPOINTMENT DATE
-            # ------------------------------------------------
-
-            dates = await find_appointment_date_options(
-                page
-            )
-
-            # ------------------------------------------------
-            # APPOINTMENT FOUND
-            # ------------------------------------------------
+            # 4. Find Dates
+            dates = await find_appointment_date_options(page)
 
             if dates:
+                return {"status": "APPOINTMENT_FOUND", "dates": dates, "center_found": center_found}
 
-                return {
-                    "status": "APPOINTMENT_FOUND",
-                    "dates": dates,
-                    "center_found": center_found
-                }
-
-            # ------------------------------------------------
-            # NO APPOINTMENT
-            # ------------------------------------------------
-
-            return {
-                "status": "NO_APPOINTMENT",
-                "dates": [],
-                "center_found": center_found
-            }
+            return {"status": "NO_APPOINTMENT", "dates": [], "center_found": center_found}
 
         except Exception as e:
-
-            print(
-                "Checker error:",
-                repr(e)
-            )
-
-            # ------------------------------------------------
-            # Screenshot
-            # ------------------------------------------------
-
-            try:
-
-                await page.screenshot(
-                    path="soneb_error.png",
-                    full_page=True
-                )
-
-                print(
-                    "Screenshot saved:"
-                    " soneb_error.png"
-                )
-
-            except Exception as screenshot_error:
-
-                print(
-                    "Screenshot failed:",
-                    repr(screenshot_error)
-                )
-
-            return {
-                "status": "CHECK_ERROR",
-                "dates": [],
-                "center_found": False
-            }
+            print("Checker error:", repr(e))
+            return {"status": "CHECK_ERROR", "dates": [], "center_found": False}
 
         finally:
-
             await browser.close()
 
 
 # ============================================================
-# PROGRAM
+# PROGRAM RUNNER
 # ============================================================
 
 async def main():
+    now = datetime.now(TIMEZONE)
 
-    now = datetime.now(
-        TIMEZONE
-    )
+    print("=" * 60)
+    print("SONEB DFS CHECKER (ULTIMATE STEALTH VERSION)")
+    print("Time:", now.strftime("%Y-%m-%d %H:%M:%S"))
+    print("=" * 60)
 
-    print("=" * 70)
-
-    print(
-        "SONEB DFS APPOINTMENT CHECKER"
-    )
-
-    print("=" * 70)
-
-    print(
-        "Time:",
-        now.strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-    )
-
-    print(
-        "Timezone: Africa/Mogadishu"
-    )
-
-    print(
-        "Target:",
-        TARGET_CENTER
-    )
-
-    print("=" * 70)
-
-    # ========================================================
-    # CHECKING HOURS
-    # ========================================================
-
-    if not (
-        START_HOUR
-        <= now.hour
-        < END_HOUR
-    ):
-
-        print(
-            "Outside checking hours."
-        )
-
+    if not (START_HOUR <= now.hour < END_HOUR):
+        print("Outside checking hours (6 AM - 10 PM).")
         return
-
-    # ========================================================
-    # CHECK
-    # ========================================================
 
     result = await check_appointment()
+    status = result.get("status")
+    dates = result.get("dates", [])
 
-    status = result.get(
-        "status"
-    )
-
-    dates = result.get(
-        "dates",
-        []
-    )
-
-    center_found = result.get(
-        "center_found",
-        False
-    )
-
-    print("=" * 70)
-
-    print(
-        "FINAL STATUS:",
-        status
-    )
-
-    print(
-        "CENTER FOUND:",
-        center_found
-    )
-
-    print(
-        "DATES:",
-        dates
-    )
-
-    print("=" * 70)
-
-    # ========================================================
-    # APPOINTMENT FOUND
-    # ========================================================
+    print("=" * 60)
+    print("STATUS:", status)
+    print("DATES:", dates)
+    print("=" * 60)
 
     if status == "APPOINTMENT_FOUND":
-
         message = (
             "🚨 SONEB DFS APPOINTMENT OPEN!\n\n"
-            "Xarunta:\n"
-            f"{TARGET_CENTER}\n\n"
+            f"Xarunta:\n{TARGET_CENTER}\n\n"
             "📅 Taariikhda Ballanta:\n"
-            + "\n".join(
-                f"• {date}"
-                for date in dates
-            )
-            + "\n\n"
-            "⚡ Fadlan hadda hubi website-ka."
+            + "\n".join(f"• {d}" for d in dates)
+            + "\n\n⚡ Fadlan hadda hubi website-ka!"
         )
+        send_telegram(message)
 
-        send_telegram(
-            message
-        )
+    elif status == "BLOCKED":
+        send_telegram("⚠️ SONEB CHECKER: Real Cloudflare challenge encountered.")
 
-        print(
-            "Appointment FOUND!"
-        )
-
-        return
-
-    # ========================================================
-    # REAL BLOCK
-    # ========================================================
-
-    if status == "BLOCKED":
-
-        message = (
-            "⚠️ SONEB CHECKER WARNING\n\n"
-            "CAPTCHA / Cloudflare challenge "
-            "ayaa la helay.\n\n"
-            "Checker-ku ma xaqiijin karo "
-            "in ballan jiro ama uusan jirin.\n\n"
-            f"🕐 {now.strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-
-        send_telegram(
-            message
-        )
-
-        return
-
-    # ========================================================
-    # CHECK ERROR
-    # ========================================================
-
-    if status == "CHECK_ERROR":
-
-        message = (
-            "🔴 SONEB CHECKER ERROR\n\n"
-            "Checker-ku wuxuu la kulmay "
-            "qalad.\n\n"
-            "❗ Tani macnaheedu ma aha "
-            "in ballan uusan jirin.\n\n"
-            f"🕐 {now.strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-
-        send_telegram(
-            message
-        )
-
-        return
-
-    # ========================================================
-    # DFS NOT FOUND
-    # ========================================================
-
-    if status == "DFS_NOT_FOUND":
-
-        print(
-            "DFS was not found."
-        )
-
-        return
-
-    # ========================================================
-    # NO APPOINTMENT
-    # ========================================================
-
-    if status == "NO_APPOINTMENT":
-
-        print(
-            "No appointment options found."
-        )
-
-        # ----------------------------------------------------
-        # HEARTBEAT
-        # ----------------------------------------------------
-
+    elif status == "NO_APPOINTMENT":
         if should_send_heartbeat():
-
-            message = (
+            msg = (
                 "🔄 SONEB DFS STATUS\n\n"
-                "❌ Wali ballan lama helin.\n\n"
-                "✅ Checker-ku wuu shaqeynayaa.\n"
-                "⏱️ Wuxuu hubinayaa SONEB "
-                "10 daqiiqo kasta.\n\n"
+                "❌ Wali ballan lama helin.\n"
+                "✅ Checker-ku si caadi ah ayuu u shaqeynayaa.\n\n"
                 f"🕐 {now.strftime('%Y-%m-%d %H:%M:%S')}"
             )
-
-            if send_telegram(
-                message
-            ):
-
+            if send_telegram(msg):
                 update_heartbeat()
 
-        else:
-
-            print(
-                "Heartbeat not due yet."
-            )
-
-        return
-
-
-# ============================================================
-# RUN
-# ============================================================
 
 if __name__ == "__main__":
     asyncio.run(main())
